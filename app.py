@@ -29,7 +29,7 @@ class ShopConfig(AppConfig):
 
 # ---------------------------------------------------------------- SETTINGS
 if not settings.configured:
-        for d in ("staticfiles", "media"):
+            for d in ("staticfiles", "media"):
         try:
             (BASE_DIR / d).mkdir(exist_ok=True)
         except OSError:
