@@ -29,9 +29,12 @@ class ShopConfig(AppConfig):
 
 # ---------------------------------------------------------------- SETTINGS
 if not settings.configured:
-    (BASE_DIR / "staticfiles").mkdir(exist_ok=True)
-    (BASE_DIR / "media").mkdir(exist_ok=True)
-    settings.configure(
+        for d in ("staticfiles", "media"):
+        try:
+            (BASE_DIR / d).mkdir(exist_ok=True)
+        except OSError:
+            pass
+    settings.configure
         DEBUG=DEBUG,
         SECRET_KEY=os.getenv("SECRET_KEY", "change-me-in-production"),
         ALLOWED_HOSTS=["*"],
