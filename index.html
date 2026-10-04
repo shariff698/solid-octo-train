@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ProSkills Online</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="nav">
+  <a class="brand" href="{% url 'index' %}">ProSkills<span>Online</span></a>
+  <form class="search" action="{% url 'index' %}" autocomplete="off">
+    <input id="q" name="q" value="{{ q|default:'' }}" placeholder="Search guides, eBooks, courses…">
+    <button>Search</button>
+    <div id="suggest"></div>
+  </form>
+  <button class="burger" id="burger" aria-label="Menu">☰</button>
+  <nav id="menu">
+    {% if user.is_authenticated %}
+      <a href="{% url 'library' %}">My library</a>
+      <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="link">Log out ({{ user.username }})</button></form>
+    {% else %}
+      <a href="{% url 'login' %}">Log in</a>
+      <a class="btn" href="{% url 'signup' %}">Sign up</a>
+    {% endif %}
+  </nav>
+</header>
+
+{% if messages %}<div class="wrap">{% for m in messages %}<p class="msg {{ m.tags }}">{{ m }}</p>{% endfor %}</div>{% endif %}
+
+<main class="wrap">
+
+{% if page == "home" %}
+  <section class="hero">
+    <h1>Learn a skill. Earn online.</h1>
+    <p>Step-by-step digital guides you can download the minute you pay with M-Pesa.</p>
+  </section>
+  <div class="chips">
+    <a class="{% if not cat %}on{% endif %}" href="?">All</a>
+    {% for c in cats %}<a class="{% if c == cat %}on{% endif %}" href="?cat={{ c|urlencode }}">{{ c }}</a>{% endfor %}
+  </div>
+  {% if q %}<p class="muted">Results for “{{ q }}”</p>{% endif %}
+  <div class="grid">
+    {% for p in products %}
+    <a class="card" href="{% url 'detail' p.slug %}">
+      <div class="thumb" {% if p.image_url %}style="background-image:url('{{ p.image_url }}')"{% endif %}><b>{{ p.category }}</b></div>
+      <h3>{{ p.title }}</h3>
+      <p>{{ p.description|truncatechars:90 }}</p>
+      <strong>KES {{ p.price|floatformat:0 }}</strong>
+    </a>
+    {% empty %}
+    <p class="muted">Nothing matched. Try another search, or add products in /admin/.</p>
+    {% endfor %}
+  </div>
+
+{% elif page == "detail" %}
+  <div class="split">
+    <div class="thumb big" {% if p.image_url %}style="background-image:url('{{ p.image_url }}')"{% endif %}></div>
+    <div>
+      <small class="muted">{{ p.category }}</small>
+      <h1>{{ p.title }}</h1>
+      <p>{{ p.description|linebreaksbr }}</p>
+      <h2>KES {{ p.price|floatformat:0 }}</h2>
+      {% if owned %}<a class="btn" href="{% url 'download' owned.pk %}">Download</a>
+      {% else %}<a class="btn" href="{% url 'checkout' p.slug %}">Buy with M-Pesa</a>{% endif %}
+    </div>
+  </div>
+
+{% elif page == "checkout" %}
+  <div class="box">
+    <h1>Checkout</h1>
+    <p>{{ p.title }} — <strong>KES {{ p.price|floatformat:0 }}</strong></p>
+    <form method="post">{% csrf_token %}
+      <label>M-Pesa phone number<input name="phone" placeholder="0712345678" required></label>
+      <button class="btn">Pay KES {{ p.price|floatformat:0 }}</button>
+    </form>
+    <p class="muted">You'll get an M-Pesa prompt on your phone. Enter your PIN to confirm.</p>
+  </div>
+
+{% elif page == "order" %}
+  <div class="box" id="order" data-url="{% url 'order_status' o.pk %}" {% if o.status == 'pending' %}data-pending="1"{% endif %}>
+    <h1>Order #{{ o.pk }}</h1>
+    <p>{{ o.product.title }} · KES {{ o.amount|floatformat:0 }}</p>
+    <p class="msg {{ o.status }}">
+      {% if o.status == 'paid' %}Payment received. Receipt {{ o.receipt }}.
+      {% elif o.status == 'failed' %}Payment failed or was cancelled.
+      {% else %}Waiting for your M-Pesa PIN…{% endif %}
+    </p>
+    {% if demo %}<p class="muted">Demo mode: add M-Pesa keys to charge real payments.</p>{% endif %}
+    {% if o.status == 'paid' %}<a class="btn" href="{% url 'download' o.pk %}">Download now</a>{% endif %}
+    {% if o.status == 'failed' %}<a class="btn" href="{% url 'checkout' o.product.slug %}">Try again</a>{% endif %}
+  </div>
+
+{% elif page == "library" %}
+  <h1>My library</h1>
+  <table>
+    <tr><th>Product</th><th>Amount</th><th>Status</th><th></th></tr>
+    {% for o in orders %}
+    <tr>
+      <td>{{ o.product.title }}</td><td>KES {{ o.amount|floatformat:0 }}</td><td>{{ o.get_status_display }}</td>
+      <td>{% if o.status == 'paid' %}<a href="{% url 'download' o.pk %}">Download</a>{% elif o.status == 'pending' %}<a href="{% url 'order' o.pk %}">Check</a>{% endif %}</td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4" class="muted">No purchases yet. <a href="{% url 'index' %}">Browse products</a></td></tr>
+    {% endfor %}
+  </table>
+
+{% elif page == "login" %}
+  <div class="box">
+    <h1>Log in</h1>
+    <form method="post">{% csrf_token %}
+      <input type="hidden" name="next" value="{{ next }}">
+      {{ form.as_p }}
+      <button class="btn">Log in</button>
+    </form>
+    <p class="muted">New here? <a href="{% url 'signup' %}">Create an account</a></p>
+  </div>
+
+{% elif page == "signup" %}
+  <div class="box">
+    <h1>Create account</h1>
+    <form method="post">{% csrf_token %}{{ form.as_p }}<button class="btn">Sign up</button></form>
+    <p class="muted">Have an account? <a href="{% url 'login' %}">Log in</a></p>
+  </div>
+{% endif %}
+
+</main>
+<footer>© ProSkills Online · Kisii, Kenya · Instant digital delivery after payment</footer>
+<script src="/app.js"></script>
+</body>
+</html>
