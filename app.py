@@ -29,8 +29,7 @@ class ShopConfig(AppConfig):
 
 # ---------------------------------------------------------------- SETTINGS
 if not settings.configured:
-            
-    settings.configure
+        settings.configure(
         DEBUG=DEBUG,
         SECRET_KEY=os.getenv("SECRET_KEY", "change-me-in-production"),
         ALLOWED_HOSTS=["*"],
