@@ -1,4 +1,5 @@
 Django>=5.0
 requests
 whitenoise
+psycopg[binary]>=3.1
 gunicorn
