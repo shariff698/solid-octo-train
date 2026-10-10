@@ -1,8 +1,8 @@
-"""ProSkills Online - single-file Django shop.
-Commands:  python app.py setup | createsuperuser | runserver
-Production: gunicorn app:application   (or a WSGI file that does: from app import application)"""
+"""ProSkills Online - single-file Django shop for Vercel (Postgres database, external download links).
+Local use:  python app.py runserver      (uses SQLite unless DATABASE_URL is set)
+Vercel:     entrypoint is  app:application  (see pyproject.toml)"""
 import sys
-if __name__ == "__main__":  # always run through the importable module `app` (prevents double-loading)
+if __name__ == "__main__":  # always run through the importable module `app`
     from app import cli
     cli()
     sys.exit()
@@ -11,6 +11,7 @@ import base64, json, os, re
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 import django
@@ -18,7 +19,7 @@ from django.apps import AppConfig
 from django.conf import settings
 
 BASE_DIR = Path(__file__).resolve().parent
-DEBUG = os.getenv("DEBUG", "1") == "1"
+DEBUG = os.getenv("DEBUG", "0") == "1"
 
 
 class ShopConfig(AppConfig):
@@ -27,14 +28,42 @@ class ShopConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
 
+def database_config():
+    """Postgres when DATABASE_URL / POSTGRES_URL is set, otherwise local SQLite."""
+    url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+    if not url:  # Vercel may add a prefix (e.g. STORAGE_DATABASE_URL): find any Postgres link
+        for name in sorted(os.environ):
+            val = os.environ[name]
+            if name.endswith(("DATABASE_URL", "POSTGRES_URL")) and val.startswith(("postgres://", "postgresql://")):
+                url = val
+                break
+    if not url:
+        return {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}
+    u = urlparse(url)
+    options = {k: v[0] for k, v in parse_qs(u.query).items()}
+    if u.hostname and u.hostname not in ("localhost", "127.0.0.1"):
+        options.setdefault("sslmode", "require")
+    return {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": u.path.lstrip("/"), "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
+        "HOST": u.hostname or "", "PORT": u.port or 5432,
+        "CONN_MAX_AGE": 0, "DISABLE_SERVER_SIDE_CURSORS": True, "OPTIONS": options,
+    }
+
+
 # ---------------------------------------------------------------- SETTINGS
 if not settings.configured:
-        settings.configure(
+    trusted = [o for o in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if o]
+    for var in ("VERCEL_URL", "VERCEL_BRANCH_URL", "VERCEL_PROJECT_PRODUCTION_URL"):
+        if os.getenv(var):
+            trusted.append("https://" + os.getenv(var))
+    settings.configure(
         DEBUG=DEBUG,
         SECRET_KEY=os.getenv("SECRET_KEY", "change-me-in-production"),
         ALLOWED_HOSTS=["*"],
-        CSRF_TRUSTED_ORIGINS=[o for o in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if o],
+        CSRF_TRUSTED_ORIGINS=trusted,
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+        SESSION_COOKIE_SECURE=not DEBUG, CSRF_COOKIE_SECURE=not DEBUG,
         ROOT_URLCONF="app",
         INSTALLED_APPS=[
             "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
@@ -45,6 +74,7 @@ if not settings.configured:
         MIDDLEWARE=[
             "django.middleware.security.SecurityMiddleware",
             "whitenoise.middleware.WhiteNoiseMiddleware",
+            "app.AutoSetupMiddleware",
             "django.contrib.sessions.middleware.SessionMiddleware",
             "django.middleware.common.CommonMiddleware",
             "django.middleware.csrf.CsrfViewMiddleware",
@@ -59,10 +89,9 @@ if not settings.configured:
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages"]},
         }],
-        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}},
+        DATABASES={"default": database_config()},
         STATIC_URL="/static/", STATIC_ROOT=BASE_DIR / "staticfiles",
         WHITENOISE_USE_FINDERS=True,
-        MEDIA_URL="/media/", MEDIA_ROOT=BASE_DIR / "media",
         LOGIN_URL="/login/", LOGIN_REDIRECT_URL="/", LOGOUT_REDIRECT_URL="/",
         DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
         # M-Pesa (Safaricom Daraja)
@@ -72,8 +101,8 @@ if not settings.configured:
         MPESA_PASSKEY=os.getenv("MPESA_PASSKEY", ""),
         MPESA_CALLBACK_URL=os.getenv("MPESA_CALLBACK_URL", "https://yourdomain.com/mpesa/callback/"),
         MPESA_BASE=os.getenv("MPESA_BASE", "https://sandbox.safaricom.co.ke"),
-        # Demo auto-confirm is ONLY allowed while DEBUG=1 and no M-Pesa keys (never in production)
-        DEMO_MODE=DEBUG and not os.getenv("MPESA_KEY"),
+        # Fake payments for TESTING ONLY: set DEMO_PAYMENTS=1 (never on a live shop)
+        DEMO_MODE=os.getenv("DEMO_PAYMENTS", "0") == "1" and not os.getenv("MPESA_KEY"),
     )
 django.setup()
 
@@ -88,22 +117,22 @@ from django.core.management import call_command, execute_from_command_line
 from django.core.wsgi import get_wsgi_application
 from django.db import connection, models
 from django.db.models import Q
-from django.http import FileResponse, Http404, JsonResponse
+from django.http import FileResponse, Http404, HttpResponseRedirect, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import path
 from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 
 
-# ---------------------------------------------------------------- MODELS (one database)
+# ---------------------------------------------------------------- MODELS
 class Product(models.Model):
     title = models.CharField(max_length=160)
     slug = models.SlugField(unique=True, blank=True)
     category = models.CharField(max_length=60, default="eBooks")
     description = models.TextField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    image_url = models.URLField(blank=True)
-    file = models.FileField(upload_to="products/")
+    image_url = models.URLField(blank=True, max_length=500)
+    download_url = models.URLField(max_length=500, help_text="Link to the file (Google Drive, Dropbox, etc.). Buyers get it after paying.")
     created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -150,15 +179,42 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ("status",)
 
 
+# ---------------------------------------------------------------- DATABASE SETUP (automatic)
 def setup_db():
-    """Creates Django's tables plus Product/Order. Safe to run many times."""
-    call_command("migrate", verbosity=1)
+    call_command("migrate", verbosity=0)
     existing = connection.introspection.table_names()
     with connection.schema_editor() as editor:
         for m in (Product, Order):
             if m._meta.db_table not in existing:
                 editor.create_model(m)
-    print("Database ready. Next: python app.py createsuperuser")
+
+
+def ensure_db():
+    """Creates all tables on first run and the admin account from ADMIN_* variables."""
+    if "shop_order" not in connection.introspection.table_names():
+        try:
+            setup_db()
+        except Exception:
+            if "shop_order" not in connection.introspection.table_names():
+                raise  # real failure (another instance may have created them meanwhile)
+    u, e, p = os.getenv("ADMIN_USER"), os.getenv("ADMIN_EMAIL", ""), os.getenv("ADMIN_PASSWORD")
+    if u and p and not User.objects.filter(username=u).exists():
+        User.objects.create_superuser(u, e, p)
+
+
+_ready = False
+
+
+class AutoSetupMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        global _ready
+        if not _ready:
+            ensure_db()
+            _ready = True
+        return self.get_response(request)
 
 
 # ---------------------------------------------------------------- M-PESA
@@ -283,7 +339,7 @@ def mpesa_callback(request):
         o = Order.objects.get(checkout_id=cb["CheckoutRequestID"], status="pending")
         if cb["ResultCode"] == 0:
             items = {i["Name"]: i.get("Value") for i in cb["CallbackMetadata"]["Item"]}
-            if Decimal(str(items.get("Amount", 0))) >= o.amount:  # only accept the full amount
+            if Decimal(str(items.get("Amount", 0))) >= o.amount:
                 o.status, o.receipt = "paid", str(items.get("MpesaReceiptNumber", ""))
             else:
                 o.status = "failed"
@@ -303,9 +359,9 @@ def library(request):
 @login_required
 def download(request, pk):
     o = get_object_or_404(Order, pk=pk, user=request.user, status="paid")
-    if not o.product.file:
+    if not o.product.download_url:
         raise Http404
-    return FileResponse(o.product.file.open("rb"), as_attachment=True, filename=o.product.file.name.split("/")[-1])
+    return HttpResponseRedirect(o.product.download_url)
 
 
 def asset(request, name):
@@ -332,11 +388,8 @@ urlpatterns = [
     path("download/<int:pk>/", download, name="download"),
 ]
 
-application = get_wsgi_application()  # gunicorn app:application
+application = get_wsgi_application()
 
 
 def cli():
-    if len(sys.argv) > 1 and sys.argv[1] == "setup":
-        setup_db()
-    else:
-        execute_from_command_line(sys.argv)
+    execute_from_command_line(sys.argv)
