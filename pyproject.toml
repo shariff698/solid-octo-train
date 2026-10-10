@@ -2,7 +2,7 @@
 name = "proskills"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["Django>=5.0", "requests", "whitenoise"]
+dependencies = ["Django>=5.0", "requests", "whitenoise", "psycopg[binary]>=3.1"]
 
 [tool.vercel]
 entrypoint = "app:application"
